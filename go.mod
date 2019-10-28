@@ -3,7 +3,10 @@ module github.com/vegasq/kremote
 go 1.13
 
 require (
-	github.com/Azure/go-autorest v11.1.2+incompatible // indirect
+	github.com/gdamore/tcell v1.3.0
+	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+	github.com/pkg/errors v0.8.1
+	github.com/rivo/tview v0.0.0-20191018125527-685bf6da76c2
 	github.com/sirupsen/logrus v1.4.2
 	k8s.io/api v0.0.0-20191024025707-4cb0a757333c
 	k8s.io/apimachinery v0.0.0-20191024025529-62ce3d1e6a82

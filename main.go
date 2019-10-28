@@ -1,139 +1,147 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
+	"github.com/gdamore/tcell"
 	"github.com/sirupsen/logrus"
 	coreV1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	restclient "k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	exex "k8s.io/kubectl/pkg/cmd/exec"
+	"github.com/rivo/tview"
+	"os"
+	"strings"
 )
 
-
-func GetConfig() (*restclient.Config) {
-	config, confErr := clientcmd.BuildConfigFromFlags(
-		"", "/Users/myakovliev/kube_52b/admin/kubeconfig2.yaml")
-
-	if confErr != nil {
-		logrus.Fatalln("Can't read config: %s.\n", confErr)
-	}
-
-	config.APIPath = "/api"
-
-	var Unversioned = schema.GroupVersion{Group: "", Version: "v1"}
-	config.GroupVersion = &Unversioned
-	config.NegotiatedSerializer = scheme.Codecs
-
-	return config
-}
-
-func GetClientSet(config *restclient.Config) *kubernetes.Clientset {
-	if config == nil {
-		logrus.Errorf("Empty config: %s", config)
-		return &kubernetes.Clientset{}
-	}
-
-	var cliSetErr error
-	clientSet, cliSetErr := kubernetes.NewForConfig(config)
-
-	if cliSetErr != nil {
-		logrus.Errorf("Can't create clientSet: %s", cliSetErr)
-	}
-	return clientSet
-}
-
-
-type kubernetesObjectEmitter struct{
-	kubernetes.Clientset
-	restclient.Config
-}
-
-func NewKubernetesObjectEmitter(cs kubernetes.Clientset, c restclient.Config) kubernetesObjectEmitter {
-	koe := kubernetesObjectEmitter{}
-	koe.Clientset = cs
-	koe.Config = c
-
-	return koe
-}
-
-func (kubernetesObjectEmitter) newStreamOptions(pod coreV1.Pod) (exex.StreamOptions, *bytes.Buffer) {
-	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
-	errOut := &bytes.Buffer{}
-
-	stream := genericclioptions.IOStreams{
-		In:     in,
-		Out:    out,
-		ErrOut: errOut,
-	}
-
-	so := exex.StreamOptions{
-		PodName:   pod.Name,
-		Namespace: pod.Namespace,
-		IOStreams: stream,
-		Stdin:     true,
-	}
-
-	return so, out
-}
-
-func (koe kubernetesObjectEmitter) newExecOptions(cmd []string, so exex.StreamOptions) exex.ExecOptions {
-	r := exex.ExecOptions{Command: cmd, StreamOptions: so}
-
-	r.Config = &koe.Config
-	r.PodClient = koe.Clientset.CoreV1()
-	r.Executor = &exex.DefaultRemoteExecutor{}
-
-	return r
-}
-
-type runnerTask struct {
-	Pod coreV1.Pod
-	Output string
-	Error string
-}
-
-func runner(context kubernetesObjectEmitter, pod coreV1.Pod, out chan runnerTask){
-	if pod.Status.Phase != "Running" {
-		out <- runnerTask{Pod: pod, Error: "Pod is not running"}
-		return
-	}
-
-	streamOpts, result := context.newStreamOptions(pod)
-	execOpts := context.newExecOptions([]string{"uname", "-a"}, streamOpts)
-	err := execOpts.Run()
+func collectPods(ui *UIex){
+	ui.Logger.Error("Getting pods")
+	pods, err := ui.Kubik.GetPods()
 	if err != nil {
-		out <- runnerTask{Pod: pod, Error: err.Error()}
-	} else {
-		out <- runnerTask{Pod: pod, Output: result.String()}
+		panic(err)
 	}
 
+	ui.Logger.Error("Updating podList")
+	for i := range pods {
+		name := PodToKey(pods[i])
+
+		ui.Logger.Errorf("Adding item %s", name)
+		ui.PodList.AddItem(
+			name,
+			string(pods[i].Status.Phase),
+			0,
+			func(){
+				ui.APP.SetFocus(ui.CmdInput)
+			})
+	}
+	ui.APP.Draw()
+	ui.Logger.Error("podList updated")
+}
+
+type UIex struct {
+	APP *tview.Application
+	MainBox *tview.Flex
+	PodList *tview.List
+	Log *tview.TextView
+	CmdInput *tview.InputField
+
+	Logger *logrus.Logger
+
+	Kubik  Kubik
+	PodMap map[string]coreV1.Pod
+}
+
+func buildTviewApp(ui *UIex){
+	ui.Logger.Error("UI generating")
+	APP := tview.NewApplication()
+
+	podList := tview.NewList()
+	podList.Box.SetBorder(true)
+
+	logView := tview.NewTextView()
+	logView.
+		SetDynamicColors(true).
+		SetRegions(true).
+		SetWordWrap(true).
+		SetChangedFunc(func() {
+			APP.Draw()
+		}).SetBorder(true)
+
+	inputField := tview.NewInputField().
+		SetLabel("#: ").
+		SetDoneFunc(func(key tcell.Key) {
+			CmdInputHandler(key, *ui)
+	})
+	inputField.SetBorder(true)
+	inputField.GetFocusable()
+
+	rightCol := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(logView, 0, 1, false).
+		AddItem(inputField, 3, 1, true)
+
+	flex := tview.NewFlex().
+		AddItem(podList, 40, 1, true).
+		AddItem(rightCol, 0, 1, true)
+
+	ui.APP = APP
+	ui.MainBox = flex
+	ui.PodList = podList
+	ui.Log = logView
+	ui.CmdInput = inputField
+
+	ui.Logger.Error("UI generated")
+}
+
+func CmdInputHandler(key tcell.Key, ui UIex){
+	if key == 9 {
+		ui.APP.SetFocus(ui.PodList)
+	} else if key == 13 {
+		i := ui.PodList.GetCurrentItem()
+		podName, _ := ui.PodList.GetItemText(i)
+		if len(podName) > 0 {
+			nsn := strings.Split(podName, "/")
+			if len(nsn) != 2 {
+				panic(fmt.Sprintf("Incorrect name from UI %s", podName))
+			}
+
+			go func (){
+				out, err := ui.Kubik.Run(
+					ui.Kubik.GetPod(nsn[0], nsn[1]),
+					strings.Split(ui.CmdInput.GetText(), " "))
+				if err != nil {
+					msg := fmt.Sprintf("%s #> \n%s", podName, err.Error())
+					ui.Log.Write([]byte(msg))
+				} else {
+					msg := fmt.Sprintf("%s #> \n%s", podName, string(out))
+					ui.Log.Write([]byte(msg))
+				}
+			}()
+		}
+	}
+}
+
+func getLog() *logrus.Logger {
+	l := logrus.New()
+	f, err := os.OpenFile("log2.log", os.O_WRONLY | os.O_APPEND | os.O_CREATE, 0644)
+
+	if err != nil {
+		// Cannot open log file. Logging to stderr
+		fmt.Println(err)
+	} else {
+		l.SetOutput(f)
+	}
+
+	return l
 }
 
 func main(){
-	cfg := GetConfig()
-	clientSet := GetClientSet(cfg)
+	ui := UIex{}
+	ui.Logger = getLog()
 
-	list, err := clientSet.CoreV1().Pods("").List(metaV1.ListOptions{})
+	ui.Logger.Error("Create kubik")
+	ui.Kubik = NewKubik(ui, "")
+	ui.Logger.Error("Kubik created")
 
-	if err != nil {
-		logrus.Fatalln("PodList Error", err)
-	}
+	buildTviewApp(&ui)
 
-	koe := NewKubernetesObjectEmitter(*clientSet, *cfg)
-	output := make(chan runnerTask)
-
-	for i := range list.Items {
-		go runner(koe, list.Items[i], output)
-	}
-	for range list.Items {
-		o := <- output
-		fmt.Printf("Name: %s\nOut: %s\nErr: %s\n---\n", o.Pod.Name, o.Output, o.Error)
+	go collectPods(&ui)
+	if err := ui.APP.SetRoot(ui.MainBox, true).Run(); err != nil {
+		panic(err)
 	}
 }
