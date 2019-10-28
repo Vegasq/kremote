@@ -1,9 +1,12 @@
 package main
 import (
+	//"bufio"
 	"bytes"
 	"fmt"
+	//"github.com/mailru/easyjson/buffer"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	//"io"
 	"io/ioutil"
 	coreV1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,14 +50,14 @@ func getClientSet(config *restclient.Config) *kubernetes.Clientset {
 	return clientSet
 }
 
-func (Kubik) newStreamOptions(pod coreV1.Pod) (exex.StreamOptions, *bytes.Buffer) {
-	in := &bytes.Buffer{}
+func (k *Kubik) newStreamOptions(pod coreV1.Pod) (exex.StreamOptions, *bytes.Buffer) {
+	k.in = &bytes.Buffer{}
 	out := &bytes.Buffer{}
 
 	errOut := &bytes.Buffer{}
 
 	stream := genericclioptions.IOStreams{
-		In:     in,
+		In:     k.in,
 		Out:    out,
 		ErrOut: errOut,
 	}
@@ -86,6 +89,7 @@ type Kubik struct {
 	kubernetes.Clientset
 	restclient.Config
 
+	in *bytes.Buffer
 	podCache map[string]coreV1.Pod
 }
 
@@ -125,7 +129,6 @@ func NewKubik(ui UIex, kubeconfig string) Kubik {
 
 	ui.Logger.Error("Build cache")
 	k.BuildCache(ui)
-	ui.Logger.Error(k.podCache)
 	ui.Logger.Error("Cache built")
 
 	return k
@@ -148,14 +151,33 @@ func (k *Kubik) GetPods() ([]coreV1.Pod, error) {
 	return list.Items, nil
 }
 
+
 func (k *Kubik) Run(pod coreV1.Pod, cmd []string) ([]byte, error) {
 	if pod.Status.Phase != "Running" {
 		return []byte{}, errors.Errorf("Pod %s/%s is not running.", pod.Namespace, pod.Name)
 	}
 
+	//var b bytes.Buffer
+	//r := bufio.NewReader(&b)
+	//w := bufio.NewWriter(&b)
+
+	//cmd = []string{"/bin/sh"}
 	streamOpts, result := k.newStreamOptions(pod)
+	//tty := streamOpts.SetupTTY()
+	//tty.In = r
+	//w.Write([]byte("ls"))
+
 	execOpts := k.newExecOptions(cmd, streamOpts)
+
+
+	//tty.
+	//streamOpts.IOStreams.In
+	//k.in.Write([]byte(fmt.Sprint("ls /\n\r")))
+
 	err := execOpts.Run()
+
+	//k.in.Write([]byte(fmt.Sprint("ls /\n\r")))
+
 	if err != nil {
 		return []byte{}, err
 	}
